@@ -25,6 +25,10 @@ class Question:
     qtype: int
     qclass: int
 
+    @property
+    def key(self):
+        return canonical(self.name), self.qtype, self.qclass
+
 
 @dataclass(frozen=True)
 class Record:
@@ -101,3 +105,19 @@ def read_name(packet, offset, limit=None):
             raise WireError("expanded DNS name exceeds 255 bytes")
         labels.append(packet[offset + 1:end])
         offset = end
+
+
+def read_question(packet, offset=HEADER.size):
+    name, offset = read_name(packet, offset)
+    end = offset + QUESTION.size
+    if end > len(packet):
+        raise WireError("short DNS question")
+    qtype, qclass = QUESTION.unpack_from(packet, offset)
+    return Question(name, qtype, qclass), end
+
+
+def make_query(question, transaction_id, flags=0):
+    header = HEADER.pack(transaction_id, flags, 1, 0, 0, 0)
+    name = encode_name(question.name)
+    fields = QUESTION.pack(question.qtype, question.qclass)
+    return header + name + fields
