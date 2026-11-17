@@ -260,3 +260,31 @@ def encode_response(question, transaction_id, query_flags, reply):
 
     HEADER.pack_into(packet, 0, transaction_id, flags, 1, *counts)
     return bytes(packet)
+
+
+def read_client_query(packet):
+    transaction_id, flags, questions, answers, authority, additional = read_header(packet)
+    if flags & (QR | OPCODE | AA | TC | RA | 0x0040 | RCODE):
+        raise WireError("unsupported query flags")
+    if (questions, answers, authority) != (1, 0, 0) or additional > 1:
+        raise WireError("invalid query section counts")
+
+    question, offset = read_question(packet)
+    if additional:
+        name, rtype, _, _, start, end = record_bounds(packet, offset)
+        if name or rtype != OPT:
+            raise WireError("unexpected additional record")
+
+        # Accept a well-formed OPT from dig without negotiating EDNS
+        offset = start
+        while offset < end:
+            if offset + 4 > end:
+                raise WireError("short EDNS option")
+            size = U16.unpack_from(packet, offset + 2)[0]
+            offset += 4 + size
+        if offset != end:
+            raise WireError("EDNS option exceeds record")
+
+    if offset != len(packet):
+        raise WireError("unexpected bytes after query")
+    return transaction_id, flags, question
