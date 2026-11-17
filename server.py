@@ -1,9 +1,11 @@
-"""IPv4 UDP listener for the DNS resolver"""
+"""IPv4 UDP entry point for the iterative DNS resolver"""
 
 import argparse
 import socket
 
-from dnswire import WireError, read_client_query
+from cache import Cache
+from dnswire import SERVFAIL, Reply, WireError, encode_response, read_client_query
+from resolver import ResolutionError, Resolver
 
 
 def listen(handler):
@@ -22,14 +24,29 @@ def listen(handler):
                 response = handler(packet)
             except WireError:
                 continue
-            if response is not None:
+            try:
                 sock.sendto(response, client)
+            except OSError as error:
+                print(f"Could not send DNS response: {error}", flush=True)
 
 
-def log_query(packet):
-    transaction_id, _, question = read_client_query(packet)
-    print(f"Received query {transaction_id}: {question}", flush=True)
+class Handler:
+    def __init__(self, resolver=None, cache=None):
+        self.resolver = Resolver() if resolver is None else resolver
+        self.cache = Cache() if cache is None else cache
+
+    def __call__(self, packet):
+        transaction_id, flags, question = read_client_query(packet)
+        reply = self.cache.get(question)
+        if reply is None:
+            try:
+                reply = self.resolver.resolve(question)
+            except (ResolutionError, WireError):
+                reply = Reply(SERVFAIL)
+            self.cache.put(question, reply)
+
+        return encode_response(question, transaction_id, flags, reply)
 
 
 if __name__ == "__main__":
-    listen(log_query)
+    listen(Handler())
