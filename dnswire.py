@@ -135,3 +135,72 @@ def record_bounds(packet, offset):
         raise WireError("resource data exceeds packet length")
 
     return name, rtype, rclass, ttl, start, end
+
+
+# Each layout gives the prefix length, name count, and trailing byte count
+# None allows variable trailing data after the final name
+RDATA_NAME_LAYOUTS = {
+    NS: (0, 1, 0),
+    3: (0, 1, 0),   # MD
+    4: (0, 1, 0),   # MF
+    CNAME: (0, 1, 0),
+    SOA: (0, 2, 20),
+    7: (0, 1, 0),   # MB
+    8: (0, 1, 0),   # MG
+    9: (0, 1, 0),   # MR
+    12: (0, 1, 0),  # PTR
+    14: (0, 2, 0),  # MINFO
+    MX: (2, 1, 0),
+    17: (0, 2, 0),  # RP
+    18: (2, 1, 0),  # AFSDB
+    21: (2, 1, 0),  # RT
+    24: (18, 1, None),  # SIG
+    26: (2, 2, 0),  # PX
+    30: (0, 1, None),  # NXT
+    33: (6, 1, 0),  # SRV
+    36: (2, 1, 0),  # KX
+    39: (0, 1, 0),  # DNAME
+}
+
+
+def normalize_data(packet, start, end, rtype, rclass):
+    if rtype == A and rclass == IN and end - start != 4:
+        raise WireError("invalid IPv4 record length")
+
+    layout = RDATA_NAME_LAYOUTS.get(rtype)
+    if rtype == 35:  # NAPTR
+        position = start + 4
+        for _ in range(3):
+            if position >= end:
+                raise WireError("short NAPTR character string")
+            position += packet[position] + 1
+        layout = (position - start, 1, 0)
+
+    if layout is None:
+        return packet[start:end]
+
+    prefix, name_count, tail = layout
+    position = start + prefix
+    if position >= end:
+        raise WireError("missing name in resource data")
+
+    chunks = [packet[start:position]]
+    for _ in range(name_count):
+        name, position = read_name(packet, position, end)
+        chunks.append(encode_name(name))
+
+    if tail is not None and end - position != tail:
+        raise WireError("invalid resource data layout")
+    chunks.append(packet[position:end])
+    return b"".join(chunks)
+
+
+def read_record(packet, offset):
+    name, rtype, rclass, ttl, start, end = record_bounds(packet, offset)
+    data = normalize_data(packet, start, end, rtype, rclass)
+    return Record(name, rtype, rclass, ttl, data), end
+
+
+def record_target(record):
+    name, _ = read_name(record.data, 0)
+    return name
