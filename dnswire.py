@@ -219,3 +219,44 @@ def read_sections(packet, offset, counts):
         raise WireError("unexpected bytes after DNS sections")
 
     return tuple(sections)
+
+
+def write_name(packet, name, offsets):
+    for index, label in enumerate(name):
+        suffix = name[index:]
+        if suffix in offsets:
+            packet.extend(U16.pack(0xC000 | offsets[suffix]))
+            return
+        offsets[suffix] = len(packet)
+        packet.extend(bytes((len(label),)) + label)
+    packet.append(0)
+
+
+def encode_response(question, transaction_id, query_flags, reply):
+    packet = bytearray(HEADER.size)
+    offsets = {}
+    write_name(packet, question.name, offsets)
+    packet.extend(QUESTION.pack(question.qtype, question.qclass))
+
+    flags = QR | RA | (query_flags & (RD | CD)) | (reply.flags & (TC | RCODE))
+    sections = (reply.answers, reply.authority, reply.additional)
+    counts = [0, 0, 0]
+
+    for section_index, section in enumerate(sections):
+        for record in section:
+            start = len(packet)
+            write_name(packet, record.name, offsets)
+            size = len(record.data)
+            if len(packet) + RR_HEADER.size + size > UDP_LIMIT:
+                del packet[start:]
+                if section_index < 2:
+                    flags |= TC
+                HEADER.pack_into(packet, 0, transaction_id, flags, 1, *counts)
+                return bytes(packet)
+
+            packet.extend(RR_HEADER.pack(record.rtype, record.rclass, record.ttl, size))
+            packet.extend(record.data)
+            counts[section_index] += 1
+
+    HEADER.pack_into(packet, 0, transaction_id, flags, 1, *counts)
+    return bytes(packet)
