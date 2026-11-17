@@ -204,3 +204,18 @@ def read_record(packet, offset):
 def record_target(record):
     name, _ = read_name(record.data, 0)
     return name
+
+
+def read_sections(packet, offset, counts):
+    sections = []
+    for count in counts:
+        records = []
+        for _ in range(count):
+            record, offset = read_record(packet, offset)
+            records.append(record)
+        sections.append(tuple(records))
+
+    if offset != len(packet):
+        raise WireError("unexpected bytes after DNS sections")
+
+    return tuple(sections)
