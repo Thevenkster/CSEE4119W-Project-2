@@ -121,3 +121,17 @@ def make_query(question, transaction_id, flags=0):
     name = encode_name(question.name)
     fields = QUESTION.pack(question.qtype, question.qclass)
     return header + name + fields
+
+
+def record_bounds(packet, offset):
+    name, offset = read_name(packet, offset)
+    start = offset + RR_HEADER.size
+    if start > len(packet):
+        raise WireError("short resource record header")
+
+    rtype, rclass, ttl, size = RR_HEADER.unpack_from(packet, offset)
+    end = start + size
+    if end > len(packet):
+        raise WireError("resource data exceeds packet length")
+
+    return name, rtype, rclass, ttl, start, end
