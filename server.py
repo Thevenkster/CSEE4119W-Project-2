@@ -36,7 +36,7 @@ class Handler:
         self.cache = Cache() if cache is None else cache
 
     def __call__(self, packet):
-        transaction_id, flags, question = read_client_query(packet)
+        transaction_id, flags, question, edns_size = read_client_query(packet)
         reply = self.cache.get(question)
         if reply is None:
             try:
@@ -45,7 +45,9 @@ class Handler:
                 reply = Reply(SERVFAIL)
             self.cache.put(question, reply)
 
-        return encode_response(question, transaction_id, flags, reply)
+        return encode_response(
+            question, transaction_id, flags, reply, edns_size=edns_size,
+        )
 
 
 if __name__ == "__main__":

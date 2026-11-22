@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 from cache import Cache
 from dnswire import (
-    A, AA, IN, NS, NXDOMAIN, RCODE, RD, SOA, TC,
+    A, AA, EDNS_UDP_SIZE, IN, NS, NXDOMAIN, OPT, RCODE, RD, SOA, TC,
     Question, Record, Reply, WireError, encode_name, make_query,
     read_header, read_question, read_sections,
 )
@@ -74,6 +74,39 @@ class ResolverTests(unittest.TestCase):
         now[0] = 104.0
         handler(make_query(QUESTION, 13, RD))
         self.assertEqual(resolver.resolve.call_count, 2)
+
+    def test_large_reply_honors_client_udp_size(self):
+        txt = 16
+        question = Question(NAME, txt, IN)
+        records = tuple(
+            Record(NAME, txt, IN, 60, bytes((240,)) + bytes((letter,)) * 240)
+            for letter in b"abc"
+        )
+        resolver = Mock()
+        resolver.resolve.return_value = Reply(answers=records)
+        handler = Handler(resolver=resolver)
+
+        for size, limit, count, truncated in (
+            (None, 512, 1, True),
+            (600, 600, 2, True),
+            (4096, EDNS_UDP_SIZE, 3, False),
+        ):
+            with self.subTest(edns_size=size):
+                query = make_query(question, 42, RD, edns_size=size)
+                packet = handler(query)
+                _, flags, _, answers, authority, additional = read_header(packet)
+                _, offset = read_question(packet)
+                decoded, _, extra = read_sections(
+                    packet, offset, (answers, authority, additional),
+                )
+
+                self.assertLessEqual(len(packet), limit)
+                self.assertEqual(bool(flags & TC), truncated)
+                self.assertEqual(decoded, records[:count])
+                expected = () if size is None else (Record((), OPT, EDNS_UDP_SIZE, 0, b""),)
+                self.assertEqual(extra, expected)
+
+        resolver.resolve.assert_called_once_with(question)
 
     def test_nxdomain_keeps_soa_and_is_not_cached(self):
         soa = Record(NAME, SOA, IN, 60, b"\0\0" + bytes(20))

@@ -13,6 +13,7 @@ OPCODE, RCODE = 0x7800, 0x000F
 A, NS, CNAME, SOA, MX, OPT, ANY = 1, 2, 5, 6, 15, 41, 255
 IN, SERVFAIL, NXDOMAIN = 1, 2, 3
 UDP_LIMIT = 512
+EDNS_UDP_SIZE = 1232
 
 
 class WireError(ValueError):
@@ -116,11 +117,16 @@ def read_question(packet, offset=HEADER.size):
     return Question(name, qtype, qclass), end
 
 
-def make_query(question, transaction_id, flags=0):
-    header = HEADER.pack(transaction_id, flags, 1, 0, 0, 0)
+def encode_opt(udp_size):
+    return b"\0" + RR_HEADER.pack(OPT, udp_size, 0, 0)
+
+
+def make_query(question, transaction_id, flags=0, *, edns_size=None):
+    additional = b"" if edns_size is None else encode_opt(edns_size)
+    header = HEADER.pack(transaction_id, flags, 1, 0, 0, int(edns_size is not None))
     name = encode_name(question.name)
     fields = QUESTION.pack(question.qtype, question.qclass)
-    return header + name + fields
+    return header + name + fields + additional
 
 
 def record_bounds(packet, offset):
@@ -232,25 +238,34 @@ def write_name(packet, name, offsets):
     packet.append(0)
 
 
-def encode_response(question, transaction_id, query_flags, reply):
+def encode_response(question, transaction_id, query_flags, reply, *, edns_size=None):
     packet = bytearray(HEADER.size)
     offsets = {}
     write_name(packet, question.name, offsets)
     packet.extend(QUESTION.pack(question.qtype, question.qclass))
 
     flags = QR | RA | (query_flags & (RD | CD)) | (reply.flags & (TC | RCODE))
-    sections = (reply.answers, reply.authority, reply.additional)
-    counts = [0, 0, 0]
+    if edns_size is None:
+        limit = UDP_LIMIT
+        opt = b""
+    else:
+        limit = min(EDNS_UDP_SIZE, max(UDP_LIMIT, edns_size))
+        opt = encode_opt(EDNS_UDP_SIZE)
+
+    additional = tuple(record for record in reply.additional if record.rtype != OPT)
+    sections = (reply.answers, reply.authority, additional)
+    counts = [0, 0, int(edns_size is not None)]
 
     for section_index, section in enumerate(sections):
         for record in section:
             start = len(packet)
             write_name(packet, record.name, offsets)
             size = len(record.data)
-            if len(packet) + RR_HEADER.size + size > UDP_LIMIT:
+            if len(packet) + RR_HEADER.size + size + len(opt) > limit:
                 del packet[start:]
                 if section_index < 2:
                     flags |= TC
+                packet.extend(opt)
                 HEADER.pack_into(packet, 0, transaction_id, flags, 1, *counts)
                 return bytes(packet)
 
@@ -258,6 +273,7 @@ def encode_response(question, transaction_id, query_flags, reply):
             packet.extend(record.data)
             counts[section_index] += 1
 
+    packet.extend(opt)
     HEADER.pack_into(packet, 0, transaction_id, flags, 1, *counts)
     return bytes(packet)
 
@@ -270,12 +286,13 @@ def read_client_query(packet):
         raise WireError("invalid query section counts")
 
     question, offset = read_question(packet)
+    edns_size = None
     if additional:
-        name, rtype, _, _, start, end = record_bounds(packet, offset)
+        name, rtype, edns_size, _, start, end = record_bounds(packet, offset)
         if name or rtype != OPT:
             raise WireError("unexpected additional record")
 
-        # Accept a well-formed OPT from dig without negotiating EDNS
+        # Check option lengths before using the advertised payload size
         offset = start
         while offset < end:
             if offset + 4 > end:
@@ -287,4 +304,4 @@ def read_client_query(packet):
 
     if offset != len(packet):
         raise WireError("unexpected bytes after query")
-    return transaction_id, flags, question
+    return transaction_id, flags, question, edns_size

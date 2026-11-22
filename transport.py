@@ -5,14 +5,14 @@ import socket
 import time
 
 from dnswire import (
-    OPCODE, QR, Reply, WireError, make_query, read_header, read_question,
+    EDNS_UDP_SIZE, OPCODE, QR, Reply, WireError, make_query, read_header, read_question,
     read_sections,
 )
 
 
 def ask_server(address, question, timeout):
     transaction_id = secrets.randbits(16)
-    request = make_query(question, transaction_id)
+    request = make_query(question, transaction_id, edns_size=EDNS_UDP_SIZE)
     deadline = time.monotonic() + timeout
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
