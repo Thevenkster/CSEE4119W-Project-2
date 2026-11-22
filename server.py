@@ -2,10 +2,31 @@
 
 import argparse
 import socket
+import sys
+from struct import Struct
 
 from cache import Cache
 from dnswire import SERVFAIL, Reply, WireError, encode_response, read_client_query
 from resolver import ResolutionError, Resolver
+
+
+# Linux uses option 8 even on Python builds without the named constant
+IP_PKTINFO = getattr(socket, "IP_PKTINFO", 8) if sys.platform.startswith("linux") else None
+PACKET_INFO = Struct("=I4s4s")
+
+
+def receive_query(sock):
+    if IP_PKTINFO is None:
+        packet, client = sock.recvfrom(65535)
+        return packet, client, []
+
+    packet, metadata, _, client = sock.recvmsg(65535, socket.CMSG_SPACE(PACKET_INFO.size))
+    for level, kind, data in metadata:
+        if level == socket.IPPROTO_IP and kind == IP_PKTINFO:
+            _, _, destination = PACKET_INFO.unpack(data)
+            reply_info = PACKET_INFO.pack(0, destination, bytes(4))
+            return packet, client, [(level, kind, reply_info)]
+    return packet, client, []
 
 
 def listen(handler):
@@ -16,16 +37,21 @@ def listen(handler):
         parser.error("port must be between 1 and 65535")
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if IP_PKTINFO is not None:
+            sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
         sock.bind(("0.0.0.0", port))
         print(f"Listening on UDP port {port}", flush=True)
         while True:
-            packet, client = sock.recvfrom(65535)
+            packet, client, reply_source = receive_query(sock)
             try:
                 response = handler(packet)
             except WireError:
                 continue
             try:
-                sock.sendto(response, client)
+                if reply_source:
+                    sock.sendmsg([response], reply_source, 0, client)
+                else:
+                    sock.sendto(response, client)
             except OSError as error:
                 print(f"Could not send DNS response: {error}", flush=True)
 
